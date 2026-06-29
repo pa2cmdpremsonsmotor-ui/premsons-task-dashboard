@@ -1,6 +1,10 @@
 """
 Premsons Motors - Task Management Dashboard
-Deployed on Streamlit Cloud
+Excel-Integrated Version (Two-Way Sync)
+
+- Dashboard reads from Excel file
+- Dashboard writes to Excel file
+- Update Excel manually → Refresh dashboard to see changes
 """
 
 import streamlit as st
@@ -8,8 +12,9 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
+from pathlib import Path
 import hashlib
-import json
+import io
 import os
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -18,11 +23,14 @@ import os
 
 st.set_page_config(page_title="Premsons Task Dashboard", page_icon="🚗", layout="wide")
 
+# Excel file path - change this to your file location
+EXCEL_FILE = Path("premsons_tasks.xlsx")
+
 DEFAULT_PASSWORD = "premsons@123"
 ADMIN_PASSWORD = "admin@123"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DOER DATA
+# DOER DATA (Used only for initial setup)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 DOERS_DATA = [
@@ -44,15 +52,15 @@ DOERS_DATA = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DATA MANAGEMENT (Using Session State for Cloud)
+# EXCEL FILE OPERATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def initialize_data():
-    """Initialize data in session state."""
-    if "data_initialized" in st.session_state:
+def create_initial_excel():
+    """Create Excel file with initial data if it doesn't exist."""
+    if EXCEL_FILE.exists():
         return
     
     # Create users
@@ -78,7 +86,7 @@ def initialize_data():
         "role": "admin"
     })
     
-    st.session_state.users_df = pd.DataFrame(users_data)
+    users_df = pd.DataFrame(users_data)
     
     # Create sample tasks
     import random
@@ -90,7 +98,6 @@ def initialize_data():
         "Service appointment scheduling",
         "Test drive appointments",
         "Customer feedback collection",
-        "Monthly target review",
     ]
     
     tasks_data = []
@@ -99,8 +106,8 @@ def initialize_data():
     
     for doer in DOERS_DATA:
         if doer["department"] == "SALES":
-            for i in range(random.randint(3, 5)):
-                due_offset = random.randint(-3, 5)
+            for i in range(random.randint(2, 4)):
+                due_offset = random.randint(-2, 5)
                 status = "completed" if due_offset < -1 and random.random() > 0.4 else "pending"
                 
                 tasks_data.append({
@@ -108,55 +115,88 @@ def initialize_data():
                     "user_id": doer["user_id"],
                     "task_title": random.choice(sample_tasks),
                     "description": f"Daily task for {doer['name']}",
-                    "assigned_date": pd.Timestamp(today - timedelta(days=3)),
-                    "due_date": pd.Timestamp(today + timedelta(days=due_offset)),
+                    "assigned_date": today - timedelta(days=3),
+                    "due_date": today + timedelta(days=due_offset),
                     "status": status,
-                    "completed_date": pd.Timestamp(today + timedelta(days=due_offset - 1)) if status == "completed" else pd.NaT
+                    "completed_date": (today + timedelta(days=due_offset - 1)) if status == "completed" else None
                 })
                 task_counter += 1
     
-    st.session_state.tasks_df = pd.DataFrame(tasks_data)
-    st.session_state.data_initialized = True
-
-def get_users():
-    return st.session_state.users_df
-
-def get_tasks():
-    return st.session_state.tasks_df
-
-def update_task_status(task_id, new_status):
-    mask = st.session_state.tasks_df["task_id"] == task_id
-    st.session_state.tasks_df.loc[mask, "status"] = new_status
-    if new_status == "completed":
-        st.session_state.tasks_df.loc[mask, "completed_date"] = pd.Timestamp(datetime.now())
-    else:
-        st.session_state.tasks_df.loc[mask, "completed_date"] = pd.NaT
-
-def add_task(user_id, title, description, due_date):
-    tasks_df = st.session_state.tasks_df
+    tasks_df = pd.DataFrame(tasks_data)
     
+    # Save to Excel
+    with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
+        users_df.to_excel(writer, sheet_name='users', index=False)
+        tasks_df.to_excel(writer, sheet_name='tasks', index=False)
+    
+    print(f"✅ Created Excel file: {EXCEL_FILE}")
+
+def read_users_from_excel():
+    """Read users from Excel file."""
+    try:
+        df = pd.read_excel(EXCEL_FILE, sheet_name='users')
+        return df
+    except Exception as e:
+        st.error(f"Error reading users: {e}")
+        return pd.DataFrame()
+
+def read_tasks_from_excel():
+    """Read tasks from Excel file."""
+    try:
+        df = pd.read_excel(EXCEL_FILE, sheet_name='tasks')
+        # Convert date columns
+        for col in ['assigned_date', 'due_date', 'completed_date']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Error reading tasks: {e}")
+        return pd.DataFrame()
+
+def save_to_excel(users_df, tasks_df):
+    """Save both dataframes back to Excel."""
+    try:
+        with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl', mode='w') as writer:
+            users_df.to_excel(writer, sheet_name='users', index=False)
+            tasks_df.to_excel(writer, sheet_name='tasks', index=False)
+        return True
+    except Exception as e:
+        st.error(f"Error saving to Excel: {e}")
+        return False
+
+def save_tasks_to_excel(tasks_df):
+    """Save only tasks, preserving users sheet."""
+    try:
+        users_df = read_users_from_excel()
+        with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl', mode='w') as writer:
+            users_df.to_excel(writer, sheet_name='users', index=False)
+            tasks_df.to_excel(writer, sheet_name='tasks', index=False)
+        return True
+    except Exception as e:
+        st.error(f"Error saving tasks: {e}")
+        return False
+
+def get_next_task_id():
+    """Generate next task ID."""
+    tasks_df = read_tasks_from_excel()
     if tasks_df.empty:
-        new_id = "T0001"
-    else:
-        max_num = tasks_df["task_id"].str.extract(r"T(\d+)")[0].astype(int).max()
-        new_id = f"T{max_num + 1:04d}"
+        return "T0001"
     
-    new_task = pd.DataFrame([{
-        "task_id": new_id,
-        "user_id": user_id,
-        "task_title": title,
-        "description": description,
-        "assigned_date": pd.Timestamp(datetime.now()),
-        "due_date": pd.Timestamp(datetime.combine(due_date, datetime.min.time())),
-        "status": "pending",
-        "completed_date": pd.NaT
-    }])
+    # Extract numbers from task IDs
+    task_nums = tasks_df["task_id"].str.extract(r"T(\d+)")[0].dropna().astype(int)
+    if task_nums.empty:
+        return "T0001"
     
-    st.session_state.tasks_df = pd.concat([tasks_df, new_task], ignore_index=True)
-    return new_id
+    max_num = task_nums.max()
+    return f"T{max_num + 1:04d}"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA OPERATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def authenticate_user(email, password):
-    users_df = get_users()
+    """Authenticate user from Excel."""
+    users_df = read_users_from_excel()
     user_row = users_df[users_df["email"] == email.lower().strip()]
     
     if user_row.empty:
@@ -173,7 +213,71 @@ def authenticate_user(email, password):
         }
     return None
 
+def update_task_status(task_id, new_status):
+    """Update task status in Excel."""
+    tasks_df = read_tasks_from_excel()
+    
+    mask = tasks_df["task_id"] == task_id
+    tasks_df.loc[mask, "status"] = new_status
+    
+    if new_status == "completed":
+        tasks_df.loc[mask, "completed_date"] = datetime.now()
+    else:
+        tasks_df.loc[mask, "completed_date"] = pd.NaT
+    
+    save_tasks_to_excel(tasks_df)
+
+def add_task(user_id, title, description, due_date):
+    """Add new task to Excel."""
+    tasks_df = read_tasks_from_excel()
+    new_id = get_next_task_id()
+    
+    new_task = pd.DataFrame([{
+        "task_id": new_id,
+        "user_id": user_id,
+        "task_title": title,
+        "description": description,
+        "assigned_date": datetime.now(),
+        "due_date": datetime.combine(due_date, datetime.min.time()),
+        "status": "pending",
+        "completed_date": None
+    }])
+    
+    tasks_df = pd.concat([tasks_df, new_task], ignore_index=True)
+    save_tasks_to_excel(tasks_df)
+    return new_id
+
+def add_bulk_tasks(tasks_list):
+    """Add multiple tasks to Excel."""
+    tasks_df = read_tasks_from_excel()
+    count = 0
+    
+    for task in tasks_list:
+        new_id = get_next_task_id()
+        new_task = pd.DataFrame([{
+            "task_id": new_id,
+            "user_id": task["user_id"],
+            "task_title": task["task_title"],
+            "description": task.get("description", ""),
+            "assigned_date": datetime.now(),
+            "due_date": pd.to_datetime(task["due_date"]),
+            "status": "pending",
+            "completed_date": None
+        }])
+        tasks_df = pd.concat([tasks_df, new_task], ignore_index=True)
+        count += 1
+    
+    save_tasks_to_excel(tasks_df)
+    return count
+
+def delete_task(task_id):
+    """Delete a task from Excel."""
+    tasks_df = read_tasks_from_excel()
+    tasks_df = tasks_df[tasks_df["task_id"] != task_id]
+    save_tasks_to_excel(tasks_df)
+
 def calculate_performance_score(tasks_df):
+    """Calculate performance score (-100 to 0)."""
     if tasks_df.empty:
         return 0.0
     
@@ -197,6 +301,7 @@ def calculate_performance_score(tasks_df):
     return max(score, -100.0)
 
 def get_completion_stats(tasks_df):
+    """Get completion statistics."""
     total = len(tasks_df)
     if total == 0:
         return {"total": 0, "completed": 0, "pending": 0, "overdue": 0, "completion_rate": 100.0}
@@ -217,8 +322,10 @@ def get_completion_stats(tasks_df):
 # INITIALIZE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-initialize_data()
+# Create Excel file if not exists
+create_initial_excel()
 
+# Session state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
     st.session_state.user = None
@@ -229,6 +336,11 @@ if "authenticated" not in st.session_state:
 
 def login_page():
     st.title("🚗 Premsons Motors — Task Management")
+    
+    # Show Excel file status
+    if EXCEL_FILE.exists():
+        file_time = datetime.fromtimestamp(os.path.getmtime(EXCEL_FILE))
+        st.caption(f"📁 Excel File: `{EXCEL_FILE}` | Last modified: {file_time.strftime('%d %b %Y %H:%M')}")
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -266,15 +378,23 @@ Doers:
 def doer_dashboard():
     user = st.session_state.user
     
-    col1, col2 = st.columns([5, 1])
+    col1, col2, col3 = st.columns([4, 1, 1])
     with col1:
         st.title(f"📋 My Tasks")
         st.caption(f"**{user['name']}** | {user['department']}")
     with col2:
+        if st.button("🔄 Refresh"):
+            st.rerun()
+    with col3:
         if st.button("🚪 Logout"):
             st.session_state.authenticated = False
             st.session_state.user = None
             st.rerun()
+    
+    # Show Excel file info
+    if EXCEL_FILE.exists():
+        file_time = datetime.fromtimestamp(os.path.getmtime(EXCEL_FILE))
+        st.caption(f"📁 Data from: `{EXCEL_FILE}` | Last updated: {file_time.strftime('%d %b %Y %H:%M')}")
     
     col1, col2 = st.columns([2, 2])
     with col1:
@@ -282,7 +402,8 @@ def doer_dashboard():
     with col2:
         view_all = st.checkbox("Show all tasks")
     
-    all_tasks = get_tasks()
+    # Read fresh data from Excel
+    all_tasks = read_tasks_from_excel()
     my_tasks = all_tasks[all_tasks["user_id"] == user["user_id"]].copy()
     
     if not view_all:
@@ -338,24 +459,26 @@ def doer_dashboard():
     st.subheader("📝 Tasks")
     
     if my_tasks.empty:
-        st.info("No tasks found.")
+        st.info("No tasks found for selected date.")
     else:
         for idx, task in my_tasks.iterrows():
             is_overdue = task["status"] == "pending" and pd.notna(task["due_date"]) and task["due_date"].date() < date.today()
             icon = "✅" if task["status"] == "completed" else "🔴" if is_overdue else "⏳"
-            due_str = task["due_date"].strftime("%d %b") if pd.notna(task["due_date"]) else "N/A"
+            due_str = task["due_date"].strftime("%d %b %Y") if pd.notna(task["due_date"]) else "N/A"
             
             with st.expander(f"{icon} {task['task_title']} — Due: {due_str}"):
+                st.write(f"**Task ID:** {task['task_id']}")
                 st.write(f"**Description:** {task['description']}")
+                st.write(f"**Status:** {task['status'].upper()}")
                 
                 col1, col2 = st.columns([3, 1])
                 with col2:
                     if task["status"] == "pending":
-                        if st.button("✅ Complete", key=f"c_{task['task_id']}_{idx}"):
+                        if st.button("✅ Complete", key=f"c_{task['task_id']}"):
                             update_task_status(task["task_id"], "completed")
                             st.rerun()
                     else:
-                        if st.button("↩️ Reopen", key=f"r_{task['task_id']}_{idx}"):
+                        if st.button("↩️ Reopen", key=f"r_{task['task_id']}"):
                             update_task_status(task["task_id"], "pending")
                             st.rerun()
 
@@ -364,23 +487,41 @@ def doer_dashboard():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def admin_dashboard():
-    col1, col2 = st.columns([5, 1])
+    col1, col2, col3 = st.columns([4, 1, 1])
     with col1:
         st.title("📊 Administrator Dashboard")
     with col2:
+        if st.button("🔄 Refresh"):
+            st.rerun()
+    with col3:
         if st.button("🚪 Logout"):
             st.session_state.authenticated = False
             st.session_state.user = None
             st.rerun()
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Overview", "👥 Employee Reports", "➕ Assign Tasks", "📥 Export Data"])
+    # Show Excel file info
+    if EXCEL_FILE.exists():
+        file_time = datetime.fromtimestamp(os.path.getmtime(EXCEL_FILE))
+        st.caption(f"📁 Data from: `{EXCEL_FILE}` | Last updated: {file_time.strftime('%d %b %Y %H:%M')}")
     
-    users_df = get_users()
-    tasks_df = get_tasks()
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Overview", 
+        "👥 Employee Reports", 
+        "➕ Add Task", 
+        "📤 CSV Upload",
+        "📥 Export"
+    ])
+    
+    # Read fresh data from Excel
+    users_df = read_users_from_excel()
+    tasks_df = read_tasks_from_excel()
     doers = users_df[users_df["role"] == "doer"]
     
     tasks_with_info = tasks_df.merge(users_df[["user_id", "name", "department"]], on="user_id", how="left")
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 1: Overview
+    # ─────────────────────────────────────────────────────────────────────────
     with tab1:
         col1, col2, col3, col4 = st.columns(4)
         
@@ -400,7 +541,7 @@ def admin_dashboard():
         with col3:
             start_date = st.date_input("From", value=date.today() - timedelta(days=30))
         with col4:
-            end_date = st.date_input("To", value=date.today())
+            end_date = st.date_input("To", value=date.today() + timedelta(days=7))
         
         filtered_tasks = tasks_with_info.copy()
         
@@ -409,10 +550,11 @@ def admin_dashboard():
         if selected_doer != "All":
             filtered_tasks = filtered_tasks[filtered_tasks["user_id"] == selected_doer]
         
-        filtered_tasks = filtered_tasks[
-            (filtered_tasks["due_date"].dt.date >= start_date) &
-            (filtered_tasks["due_date"].dt.date <= end_date)
-        ]
+        if not filtered_tasks.empty:
+            filtered_tasks = filtered_tasks[
+                (filtered_tasks["due_date"].dt.date >= start_date) &
+                (filtered_tasks["due_date"].dt.date <= end_date)
+            ]
         
         stats = get_completion_stats(filtered_tasks)
         
@@ -466,26 +608,26 @@ def admin_dashboard():
         
         if not overdue.empty:
             overdue["days_overdue"] = (datetime.now() - overdue["due_date"]).dt.days
-            display = overdue[["user_id", "name", "task_title", "due_date", "days_overdue"]].copy()
-            display.columns = ["ID", "Employee", "Task", "Due Date", "Days Late"]
+            display = overdue[["task_id", "user_id", "name", "task_title", "due_date", "days_overdue"]].copy()
+            display.columns = ["Task ID", "User ID", "Employee", "Task", "Due Date", "Days Late"]
             display["Due Date"] = pd.to_datetime(display["Due Date"]).dt.strftime("%d %b %Y")
             st.dataframe(display, use_container_width=True, hide_index=True)
         else:
             st.success("✅ No overdue tasks!")
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 2: Employee Reports
+    # ─────────────────────────────────────────────────────────────────────────
     with tab2:
-        st.subheader("👥 Individual Reports")
+        st.subheader("👥 Individual Employee Reports")
         
         for dept in doers["department"].unique():
-            st.markdown(f"### 🏢 {dept}")
+            st.markdown(f"### 🏢 {dept} Department")
             
             dept_doers = doers[doers["department"] == dept]
             
             for _, doer in dept_doers.iterrows():
                 user_tasks = tasks_with_info[tasks_with_info["user_id"] == doer["user_id"]]
-                
-                if user_tasks.empty:
-                    continue
                 
                 user_stats = get_completion_stats(user_tasks)
                 user_score = calculate_performance_score(user_tasks)
@@ -499,11 +641,15 @@ def admin_dashboard():
                     col3.metric("Pending", user_stats["pending"])
                     col4.metric("Rate", f"{user_stats['completion_rate']}%")
                     
-                    st.dataframe(
-                        user_tasks[["task_title", "due_date", "status"]],
-                        use_container_width=True, hide_index=True
-                    )
+                    if not user_tasks.empty:
+                        st.dataframe(
+                            user_tasks[["task_id", "task_title", "due_date", "status"]],
+                            use_container_width=True, hide_index=True
+                        )
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 3: Add Single Task
+    # ─────────────────────────────────────────────────────────────────────────
     with tab3:
         st.subheader("➕ Create New Task")
         
@@ -511,43 +657,128 @@ def admin_dashboard():
             col1, col2 = st.columns(2)
             
             with col1:
-                dept = st.selectbox("Department", doers["department"].unique(), key="new_dept")
+                dept = st.selectbox("Department", doers["department"].unique(), key="add_dept")
                 dept_doers = doers[doers["department"] == dept]
                 assignee = st.selectbox("Assign To", dept_doers["user_id"].tolist(),
                                        format_func=lambda x: f"{dept_doers[dept_doers['user_id']==x]['name'].values[0]} ({x})",
-                                       key="new_assignee")
+                                       key="add_assignee")
             
             with col2:
                 title = st.text_input("Task Title")
-                due = st.date_input("Due Date", min_value=date.today(), key="new_due")
+                due = st.date_input("Due Date", min_value=date.today(), key="add_due")
             
             desc = st.text_area("Description")
             
             if st.form_submit_button("Create Task", type="primary"):
-                if title and assignee:
-                    task_id = add_task(assignee, title, desc, due)
-                    st.success(f"✅ Task {task_id} created!")
+                if title.strip():
+                    task_id = add_task(assignee, title.strip(), desc, due)
+                    st.success(f"✅ Task **{task_id}** created!")
+                    st.rerun()
                 else:
-                    st.error("Fill all required fields")
+                    st.error("Enter task title")
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 4: CSV Bulk Upload
+    # ─────────────────────────────────────────────────────────────────────────
     with tab4:
-        st.subheader("📥 Export Data to Excel")
+        st.subheader("📤 Bulk Upload Tasks via CSV")
         
-        import io
+        st.markdown("**📋 Valid Employee IDs:**")
+        st.dataframe(doers[["user_id", "name", "department"]], use_container_width=True, hide_index=True, height=200)
         
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            users_df.to_excel(writer, sheet_name='users', index=False)
-            tasks_df.to_excel(writer, sheet_name='tasks', index=False)
+        st.markdown("---")
         
-        st.download_button(
-            label="📥 Download Excel File",
-            data=buffer.getvalue(),
-            file_name="premsons_tasks_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        sample_csv = """user_id,task_title,description,due_date
+PS1,Daily Sales Report,Submit sales numbers,2026-07-01
+PS2,Customer Follow-up,Call pending leads,2026-07-02
+PSD,Inventory Check,Verify stock,2026-07-03"""
         
-        st.info("Download the Excel file to keep a backup of all data.")
+        st.download_button("📥 Download CSV Template", sample_csv, "tasks_template.csv", "text/csv")
+        
+        uploaded_file = st.file_uploader("📁 Upload CSV File", type=["csv"])
+        
+        if uploaded_file:
+            try:
+                upload_df = pd.read_csv(uploaded_file)
+                
+                required_cols = ["user_id", "task_title", "due_date"]
+                missing = [c for c in required_cols if c not in upload_df.columns]
+                
+                if missing:
+                    st.error(f"Missing columns: {', '.join(missing)}")
+                else:
+                    if "description" not in upload_df.columns:
+                        upload_df["description"] = ""
+                    
+                    valid_ids = set(doers["user_id"].tolist())
+                    upload_df["valid"] = upload_df["user_id"].isin(valid_ids)
+                    
+                    valid_tasks = upload_df[upload_df["valid"]]
+                    invalid_tasks = upload_df[~upload_df["valid"]]
+                    
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Total", len(upload_df))
+                    col2.metric("✅ Valid", len(valid_tasks))
+                    col3.metric("❌ Invalid", len(invalid_tasks))
+                    
+                    if not invalid_tasks.empty:
+                        st.warning(f"Invalid user_ids: {invalid_tasks['user_id'].tolist()}")
+                    
+                    if not valid_tasks.empty:
+                        st.dataframe(valid_tasks[["user_id", "task_title", "due_date"]], hide_index=True)
+                        
+                        if st.button("🚀 Import Tasks", type="primary"):
+                            tasks_list = valid_tasks.to_dict('records')
+                            count = add_bulk_tasks(tasks_list)
+                            st.success(f"✅ Imported {count} tasks!")
+                            st.balloons()
+                            st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # TAB 5: Export Data
+    # ─────────────────────────────────────────────────────────────────────────
+    with tab5:
+        st.subheader("📥 Export Data")
+        
+        st.markdown(f"**📁 Excel File Location:** `{EXCEL_FILE.absolute()}`")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Download Excel")
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                users_df.to_excel(writer, sheet_name='users', index=False)
+                tasks_df.to_excel(writer, sheet_name='tasks', index=False)
+            
+            st.download_button(
+                "📥 Download Excel",
+                buffer.getvalue(),
+                f"premsons_data_{date.today()}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        
+        with col2:
+            st.markdown("### Download CSV")
+            st.download_button(
+                "📥 Download Tasks CSV",
+                tasks_df.to_csv(index=False),
+                f"tasks_{date.today()}.csv",
+                "text/csv",
+                use_container_width=True
+            )
+        
+        st.markdown("---")
+        st.info("""
+        **💡 How to update data via Excel:**
+        1. Open the Excel file: `premsons_tasks.xlsx`
+        2. Edit the `tasks` sheet (add/modify/delete rows)
+        3. Save the Excel file
+        4. Click **🔄 Refresh** on the dashboard
+        """)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
